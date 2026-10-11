@@ -2,11 +2,6 @@
 
 Turn your webcam into a foggy mirror. Blow at the screen to fog it up, draw on the glass with your finger, and wipe it clean with your palm.
 
-<!-- Replace with a short screen recording of the effect -->
-![Fog Mirror demo](demo.gif)
-
-**Try it:** [your-username.github.io/fog-mirror](https://your-username.github.io/fog-mirror)
-
 ## How to use
 
 1. Open the page in **Chrome on a desktop or laptop** with a webcam.
@@ -67,9 +62,6 @@ All the settings live in a `CFG` block near the top of the script in `index.html
 
 ## Credits
 
-- Inspired by [creator's name]'s post: [link to the original post]
-- Built with [Claude](https://claude.ai), with design direction and tuning by [your name].
+- Inspired by lilian.chiuuu's post: 4.38 复制打开抖音，看看【小饼干🍪lilian.chiuuu的作品】vibecode 了一面雾镜🪞✨ part 2 晚... https://v.douyin.com/OIQ9eoUx_48/ R@K.ws 11/03 JVL:/ :8pm 
+- Built with [Claude](https://claude.ai), with design direction and tuning by Iris Shi.
 
-## License
-
-[Choose a license, for example MIT, and add a LICENSE file.]
