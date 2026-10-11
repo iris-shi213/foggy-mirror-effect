@@ -8,6 +8,9 @@ Turn your webcam into a foggy mirror. Blow at the screen to fog it up, draw on t
 2. Click **Turn on camera** and allow camera access.
 3. Sit facing the camera with your face and one hand in view.
 
+**Short demo**
+https://github.com/user-attachments/assets/7c6d5dc0-b0c5-478f-b8cb-1835bfff3a08
+
 | To do this | Do this |
 | --- | --- |
 | Fog the screen | Open your mouth and blow at the screen. The fog spreads out from your mouth. |
