@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fog Mirror</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --steam: #E6ECEF;
+    --steel: #8FA3AD;
+    --amber: #FFB86B;
+    --deep: #14191C;
+    --glass: rgba(230, 236, 239, 0.14);
+    --glass-edge: rgba(230, 236, 239, 0.28);
+    --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--deep); color: var(--steam); font-family: var(--sans); overflow: hidden; }
+  canvas#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  video { display: none; }
+
+  .start {
+    position: fixed; inset: 0; display: grid; place-items: center; padding: 24px;
+    background: radial-gradient(ellipse at 50% 30%, #26323A 0%, var(--deep) 70%);
+  }
+  .start-inner { max-width: 32rem; text-align: center; }
+  .start h1 { font-family: var(--serif); font-weight: 400; font-size: clamp(3rem, 9vw, 5.5rem); line-height: 0.95; margin: 0 0 1.25rem; letter-spacing: -0.01em; }
+  .start p { color: var(--steel); font-size: 1.05rem; line-height: 1.55; margin: 0 0 2rem; }
+  .start button {
+    font: 600 1rem var(--sans); color: var(--deep); background: var(--steam);
+    border: 0; border-radius: 999px; padding: 0.9rem 1.8rem; cursor: pointer;
+  }
+  .start button:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+  .start button:disabled { opacity: 0.6; cursor: progress; }
+  .status { margin-top: 1.25rem; min-height: 1.5em; color: var(--steel); font-size: 0.95rem; }
+  .status.error { color: #FF9C8A; }
+
+  .hints {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    display: flex; gap: 6px; padding: 6px; border-radius: 22px;
+    background: var(--glass); border: 1px solid var(--glass-edge);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    max-width: calc(100% - 24px); overflow-x: auto;
+  }
+  .hint { display: flex; flex-direction: column; gap: 2px; padding: 8px 14px; border-radius: 16px; white-space: nowrap; transition: background 0.2s, color 0.2s; }
+  .hint b { font-weight: 600; font-size: 0.92rem; }
+  .hint span { font-size: 0.78rem; color: var(--steel); }
+  .hint[data-on="1"] { background: var(--steam); color: var(--deep); }
+  .hint[data-on="1"] span { color: #4A5A62; }
+
+  .debug {
+    position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: 12px;
+    font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace; white-space: pre;
+    background: rgba(20, 25, 28, 0.78); color: var(--steam); padding: 10px 12px; border-radius: 10px;
+    display: none;
+  }
+  .debug.show { display: block; }
+  .keys { position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); left: 14px; font-size: 0.8rem; color: rgba(230,236,239,0.6); }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { .hint { transition: none; } }
+</style>
+</head>
+<body>
+<video id="video" playsinline muted></video>
+<canvas id="stage"></canvas>
+
+<div class="start" id="start">
+  <div class="start-inner">
+    <h1>Fog Mirror</h1>
+    <p>Blow at the screen to fog it, then draw with one finger or wipe with your palm.</p>
+    <button id="startBtn" type="button">Turn on camera</button>
+    <div class="status" id="status" role="status"></div>
+  </div>
+</div>
+
+<div class="hints" id="hints" hidden>
+  <div class="hint" id="hBlow"><b>Open mouth and blow</b><span>Fog the glass</span></div>
+  <div class="hint" id="hDraw"><b>Point and hold still</b><span>Draw</span></div>
+  <div class="hint" id="hHover"><b>Make a fist</b><span>Move without drawing</span></div>
+  <div class="hint" id="hWipe"><b>Hold open palm</b><span>Wipe</span></div>
+</div>
+<div class="keys" id="keys" hidden>D debug · hold B to fog</div>
+<pre class="debug" id="debug"></pre>
+
+<script>
+// ---------- Tuning: adjust these if detection feels too strict or too loose ----------
+const CFG = {
+  FADE_DELAY: 3.0,         // seconds after your last breath before the fog starts fading
+  FADE_DURATION: 30.0,     // seconds for untouched fog to fully disappear
+  FOG_BUILD_RATE: 0.8,     // fog density gained per second of blowing
+  MOUTH_OPEN: 0.03,        // lip gap (as a share of face height) needed to count as an open mouth
+  MASK_SCALE: 1,           // fog mask at full resolution so line edges stay crisp
+  FOG_SCALE: 0.25,         // the blurry fog texture itself can be low resolution
+  MOUTH_HOLD: 0.25,        // seconds the mouth must stay open before fog starts (filters out talking)
+  FOG_SPREAD_RATE: 0.6,    // how fast the fog patch spreads out from your mouth
+  SMOOTH_SLOW: 0.15,       // smoothing for slow movement: lower = smoother (0.3 to 2)
+  SMOOTH_FAST: 0.003,      // how quickly live smoothing relaxes on fast strokes: higher = less lag
+  STROKE_SMOOTH: 25,       // how strongly strokes are cleaned up (pixels; higher = smoother, 0 = off)
+  LIVE_CORRECTION: true,   // clean up the line while you draw, not just when you lift the pen
+  PEN_DOWN_HOLD: 0.15,     // seconds your pointing finger must stay still before ink starts
+  STILL_SPEED: 0.15,       // how slow counts as still (share of screen height per second)
+  TAIL_TRIM: 0.1,          // seconds of ink removed at pen-up (stops the hook when you curl your finger)
+  PALM_HOLD: 0.3,          // seconds an open palm must be held before it wipes
+  WIPE_SOFTNESS: 0.35,     // how feathered the wipe edge is (0 = hard, 0.6 = very soft)
+  WIPE_AFTER_DRAW: 0.6,    // seconds after drawing before wiping is allowed
+  PEN_MIN: 0.004,          // thinnest line (hand far away), as a share of screen width
+  PEN_MAX: 0.03,           // thickest line (hand close), as a share of screen width
+  PEN_FAR: 0.10,           // hand size (share of screen height) that counts as far
+  PEN_NEAR: 0.3,           // hand size that counts as close
+  PEN_LIFT_GRACE: 0.2,      // seconds of lost tracking allowed before a line breaks
+};
+const supportsFilter = (() => { const c = document.createElement('canvas').getContext('2d'); c.filter = 'blur(2px)'; return c.filter === 'blur(2px)'; })();
+
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+const canvas = $('stage');
+const ctx = canvas.getContext('2d');
+
+// Offscreen layers
+const mk = () => document.createElement('canvas');
+const frame = mk(), fctx = frame.getContext('2d');      // lit camera frame
+const shade = mk(), sctx = shade.getContext('2d');      // full-res fog layer, cut by the mask
+const tiny = mk(), tctx = tiny.getContext('2d');        // very small copy, used for blur
+const fog = mk(), gctx = fog.getContext('2d');          // fog look
+const mask = mk(), mctx = mask.getContext('2d');        // where fog exists (alpha)
+const noise = mk(), nctx = noise.getContext('2d');      // condensation texture
+
+let W = 0, H = 0, MW = 0, MH = 0, FW = 0, FH = 0, R = { x: 0, y: 0, w: 1, h: 1 };
+let dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+function resize() {
+  W = Math.round(innerWidth * dpr); H = Math.round(innerHeight * dpr);
+  canvas.width = frame.width = shade.width = W;
+  canvas.height = frame.height = shade.height = H;
+  MW = Math.max(1, Math.round(W * CFG.MASK_SCALE)); MH = Math.max(1, Math.round(H * CFG.MASK_SCALE));
+  FW = Math.max(1, Math.round(W * CFG.FOG_SCALE)); FH = Math.max(1, Math.round(H * CFG.FOG_SCALE));
+  mask.width = MW; mask.height = MH;
+  preview.width = W; preview.height = H;
+  fog.width = FW; fog.height = FH;
+  tiny.width = Math.max(1, Math.round(W / 18)); tiny.height = Math.max(1, Math.round(H / 18));
+  if (state.fogAmount > 0.02) { mctx.fillStyle = '#fff'; mctx.fillRect(0, 0, MW, MH); }
+  computeRect();
+}
+
+function makeNoise() {
+  // Blotchy, uneven condensation: low-res random noise scaled up, plus fine specks
+  const s = mk(); s.width = Math.max(2, Math.round(MW / 10)); s.height = Math.max(2, Math.round(MH / 10));
+  const sc = s.getContext('2d'); const img = sc.createImageData(s.width, s.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random();
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+    img.data[i + 3] = Math.round(v * v * 140);
+  }
+  sc.putImageData(img, 0, 0);
+  nctx.clearRect(0, 0, MW, MH);
+  nctx.imageSmoothingEnabled = true;
+  nctx.drawImage(s, 0, 0, MW, MH);
+  const fine = nctx.getImageData(0, 0, MW, MH);
+  for (let i = 0; i < fine.data.length; i += 4) {
+    if (Math.random() < 0.04) { fine.data[i] = fine.data[i + 1] = fine.data[i + 2] = 255; fine.data[i + 3] = 200; }
+  }
+  nctx.putImageData(fine, 0, 0);
+}
+
+function computeRect() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const s = Math.max(W / vw, H / vh);
+  const w = vw * s, h = vh * s;
+  R = { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
+// Landmarks are normalized to the raw video; we show it mirrored
+const toCanvas = (p) => ({ x: R.x + (1 - p.x) * R.w, y: R.y + p.y * R.h });
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---------- State ----------
+const state = {
+  fogAmount: 0, lastBlow: -99, fogRadius: 0, fogCenter: null, fadeFrozen: false,
+  spot: null,
+};
+const face = { visible: false, lastSeen: -99, target: null, open: 0, mouthOpen: false, openTime: 0, mouth: null };
+const hand = { visible: false, lastSeen: -99, lastTouch: -99, pose: 'none', tip: null, pts: null, lostAt: null, prevWipe: null, sizePx: 80, lastInk: -99, stroke: null, inking: false, stillFor: 0, armProgress: 0, lastTip: null, notPointSince: null, palmSince: null, cursor: null, wiping: false };
+let keyBlow = false, debugOn = false;
+const now = () => performance.now() / 1000;
+
+// ---------- Tracking results ----------
+function onFace(results) {
+  const lm = results.multiFaceLandmarks && results.multiFaceLandmarks[0];
+  if (!lm) { face.visible = false; face.mouthOpen = false; return; }
+  const t = now(); face.visible = true; face.lastSeen = t;
+  const l = toCanvas(lm[234]), r = toCanvas(lm[454]), top = toCanvas(lm[10]), chin = toCanvas(lm[152]);
+  const faceW = Math.hypot(l.x - r.x, l.y - r.y);
+  face.target = { x: (l.x + r.x) / 2, y: (top.y + chin.y) / 2, r: faceW };
+  // Gap between the inner upper and lower lip, relative to face height
+  const up = toCanvas(lm[13]), lo = toCanvas(lm[14]);
+  const faceH = Math.hypot(top.x - chin.x, top.y - chin.y) || 1;
+  face.open = Math.hypot(up.x - lo.x, up.y - lo.y) / faceH;
+  face.mouthOpen = face.open > CFG.MOUTH_OPEN;
+  face.mouth = { x: (up.x + lo.x) / 2, y: (up.y + lo.y) / 2 };
+}
+
+// One Euro filter: heavy smoothing when you move slowly, less lag when you move fast
+class OneEuro {
+  constructor(minCutoff, beta, dCutoff = 1) { this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff; this.t = null; }
+  alpha(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+  filter(x, t) {
+    if (this.t === null) { this.t = t; this.x = x; this.dx = 0; return x; }
+    const dt = Math.max(1e-3, t - this.t); this.t = t;
+    const dx = (x - this.x) / dt;
+    this.dx += this.alpha(this.dCutoff, dt) * (dx - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += this.alpha(cutoff, dt) * (x - this.x);
+    return this.x;
+  }
+  reset() { this.t = null; }
+}
+const fx = new OneEuro(CFG.SMOOTH_SLOW, CFG.SMOOTH_FAST), fy = new OneEuro(CFG.SMOOTH_SLOW, CFG.SMOOTH_FAST);
+
+function onHands(results) {
+  const lms = results.multiHandLandmarks && results.multiHandLandmarks[0];
+  const t = now();
+  if (!lms) {
+    hand.visible = false; hand.pose = 'none'; hand.prevWipe = null; hand.palmSince = null; hand.cursor = null;
+    penUp(t); fx.reset(); fy.reset(); hand.lastTip = null;
+    return;
+  }
+  hand.visible = true; hand.lastSeen = t;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const d = (a, b) => Math.hypot((lms[a].x - lms[b].x) * vw, (lms[a].y - lms[b].y) * vh);
+  const size = d(0, 9) || 1;
+  hand.sizePx = size * (R.w / vw);
+  // Closer hand looks bigger, so it draws a thicker line
+  hand.sizeShare = hand.sizePx / H;
+  const near = Math.min(1, Math.max(0, (hand.sizeShare - CFG.PEN_FAR) / (CFG.PEN_NEAR - CFG.PEN_FAR)));
+  const targetW = W * lerp(CFG.PEN_MIN, CFG.PEN_MAX, near);
+  hand.penW = hand.penW ? lerp(hand.penW, targetW, 0.12) : targetW;
+  const ext = (tip, pip) => d(0, tip) > d(0, pip) * 1.12;
+  const iE = ext(8, 6), mE = ext(12, 10), rE = ext(16, 14), pE = ext(20, 18);
+
+  const touch = d(4, 12) / size < 0.38;
+
+  // point = pen down, fist = pen up (move without drawing), palm = wipe
+  let pose = 'other';
+  if (iE && mE && rE && pE) pose = 'palm';
+  else if (!iE && !mE && !rE && !pE) pose = 'fist';
+  else if (iE && !mE && !rE && !pE && !touch) pose = 'point';
+  hand.pose = pose;
+
+  // With a fist, estimate where the fingertip will be when you point again,
+  // so the cursor doesn't jump when you switch back to drawing
+  let raw;
+  if (pose === 'fist') {
+    const k = toCanvas(lms[5]), w0 = toCanvas(lms[0]);
+    raw = { x: k.x + (k.x - w0.x) * 0.8, y: k.y + (k.y - w0.y) * 0.8 };
+  } else raw = toCanvas(lms[8]);
+  const tip = { x: fx.filter(raw.x, t), y: fy.filter(raw.y, t), t, w: hand.penW };
+  hand.cursor = tip;
+
+  if (pose === 'point') {
+    hand.notPointSince = null;
+    // Pen goes down only after the pointing finger holds still for a moment,
+    // so moving into position never leaves a mark (and a dot stays a dot)
+    if (!hand.inking) {
+      const prev = hand.lastTip;
+      const dtH = prev ? Math.min(0.1, Math.max(1e-3, t - prev.t)) : 0;
+      const speed = prev ? Math.hypot(tip.x - prev.x, tip.y - prev.y) / dtH / H : 1;
+      hand.stillFor = speed < CFG.STILL_SPEED ? hand.stillFor + dtH : 0;
+      hand.armProgress = Math.min(1, hand.stillFor / CFG.PEN_DOWN_HOLD);
+      if (hand.stillFor >= CFG.PEN_DOWN_HOLD) hand.inking = true;
+    }
+    if (hand.inking) {
+      (hand.stroke || (hand.stroke = [])).push(tip);
+      hand.lastInk = t;
+      state.fadeFrozen = true; // once you draw, the fog stays as it is
+    }
+  } else {
+    if (!hand.notPointSince) hand.notPointSince = t;
+    if (t - hand.notPointSince > CFG.PEN_LIFT_GRACE) penUp(t);
+  }
+  hand.lastTip = tip;
+
+  if (pose === 'palm') {
+    if (!hand.palmSince) hand.palmSince = t;
+    const ready = t - hand.palmSince > CFG.PALM_HOLD && t - hand.lastInk > CFG.WIPE_AFTER_DRAW;
+    const ids = [0, 5, 9, 13, 17]; let x = 0, y = 0;
+    ids.forEach(i => { const p = toCanvas(lms[i]); x += p.x; y += p.y; });
+    const c = { x: x / ids.length, y: y / ids.length };
+    if (ready) { clearSoftStroke(hand.prevWipe || c, c, hand.sizePx * 1.6 * CFG.MASK_SCALE); hand.prevWipe = c; }
+    hand.wiping = ready;
+    if (ready) state.fadeFrozen = true; // once you wipe, the fog stays as it is
+  } else { hand.palmSince = null; hand.prevWipe = null; hand.wiping = false; }
+}
+
+// ---------- Strokes: live preview while drawing, cleaned up when you lift the pen ----------
+// (like drawing apps on iPad: the line you see while drawing gets smoothed once you finish)
+const preview = mk(), pvctx = preview.getContext('2d');
+
+function drawStroke(c, pts, erase) {
+  c.save();
+  c.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+  c.strokeStyle = c.fillStyle = '#000';
+  c.lineCap = 'round'; c.lineJoin = 'round';
+  if (pts.length === 1) {
+    c.beginPath(); c.arc(pts[0].x, pts[0].y, pts[0].w / 2, 0, Math.PI * 2); c.fill();
+  }
+  for (let i = 1; i < pts.length; i++) {
+    c.lineWidth = (pts[i - 1].w + pts[i].w) / 2;
+    c.beginPath(); c.moveTo(pts[i - 1].x, pts[i - 1].y); c.lineTo(pts[i].x, pts[i].y); c.stroke();
+  }
+  c.restore();
+}
+
+// Evenly spaced points along the stroke, so smoothing treats fast and slow parts the same
+function resample(pts, step) {
+  const out = [{ ...pts[0] }];
+  let carry = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    let d = step - carry;
+    while (d <= len) {
+      const k = d / len;
+      out.push({ x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), w: lerp(a.w, b.w, k) });
+      d += step;
+    }
+    carry = len - (d - step);
+  }
+  const last = pts[pts.length - 1];
+  out.push({ x: last.x, y: last.y, w: last.w });
+  return out;
+}
+
+// Gaussian smoothing; the window shrinks near the ends so the stroke keeps its start and end points
+function gaussian(pts, sigmaPts) {
+  if (sigmaPts < 0.5) return pts;
+  const R = Math.ceil(sigmaPts * 3), n = pts.length;
+  return pts.map((p, i) => {
+    const r = Math.min(R, i, n - 1 - i);
+    let x = 0, y = 0, w = 0, sum = 0;
+    for (let k = -r; k <= r; k++) {
+      const g = Math.exp(-(k * k) / (2 * sigmaPts * sigmaPts));
+      const q = pts[i + k];
+      x += q.x * g; y += q.y * g; w += q.w * g; sum += g;
+    }
+    return { x: x / sum, y: y / sum, w: w / sum };
+  });
+}
+
+function finishStroke(pts) {
+  // Drop the last moment of the stroke: that's your finger curling into a fist
+  const endT = pts[pts.length - 1].t;
+  let kept = pts.filter(p => p.t <= endT - CFG.TAIL_TRIM);
+  if (!kept.length) kept = [pts[0]];
+  drawStroke(mctx, cleanStroke(kept), true);
+}
+
+function cleanStroke(pts) {
+  if (pts.length < 2) return pts;
+  const step = 3 * dpr;
+  return gaussian(resample(pts, step), (CFG.STROKE_SMOOTH * dpr) / step);
+}
+
+// Lift the pen: commit the cleaned-up stroke
+function penUp(t) {
+  if (hand.stroke && hand.stroke.length) finishStroke(hand.stroke);
+  hand.stroke = null; hand.inking = false; hand.stillFor = 0; hand.armProgress = 0;
+}
+
+// Removes fog along a path (coordinates in canvas pixels, width in mask pixels)
+function clearPath(build, width) {
+  const s = CFG.MASK_SCALE;
+  mctx.save();
+  mctx.globalCompositeOperation = 'destination-out';
+  mctx.lineCap = 'round'; mctx.lineJoin = 'round';
+  mctx.scale(s, s);
+  mctx.strokeStyle = 'rgba(0,0,0,1)'; mctx.lineWidth = width / s;
+  mctx.beginPath(); build(); mctx.stroke();
+  mctx.restore();
+}
+const clearStroke = (a, b, w) => clearPath(() => { mctx.moveTo(a.x, a.y); mctx.lineTo(b.x + 0.01, b.y); }, w);
+const clearDot = (p, w) => clearStroke(p, p, w);
+// Wipe with a feathered edge: blur the stroke if the browser can, otherwise stack soft passes
+function clearSoftStroke(a, b, width) {
+  const s = CFG.MASK_SCALE, soft = CFG.WIPE_SOFTNESS;
+  mctx.save();
+  mctx.globalCompositeOperation = 'destination-out';
+  mctx.lineCap = 'round'; mctx.lineJoin = 'round';
+  const line = () => { mctx.beginPath(); mctx.moveTo(a.x * s, a.y * s); mctx.lineTo(b.x * s + 0.01, b.y * s); mctx.stroke(); };
+  if (supportsFilter) {
+    mctx.filter = `blur(${Math.min(30, Math.max(1, width * soft * 0.5))}px)`;
+    mctx.strokeStyle = 'rgba(0,0,0,1)'; mctx.lineWidth = width * (1 - soft * 0.5); line();
+  } else {
+    for (let k = 0; k < 4; k++) {
+      mctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      mctx.lineWidth = width * (1 + soft) * (1 - k * 0.15); line();
+    }
+  }
+  mctx.restore();
+}
+
+
+// ---------- Rendering ----------
+function updateFog(t, dt, blowing) {
+  if (blowing) {
+    if (state.fogAmount < 0.03) { mctx.clearRect(0, 0, MW, MH); state.fogRadius = 0; }
+    state.fogAmount = Math.min(1, state.fogAmount + dt * CFG.FOG_BUILD_RATE);
+    // Fog spreads out from your mouth as a soft radial patch
+    const maxR = Math.hypot(MW, MH);
+    state.fogRadius = Math.min(maxR, state.fogRadius + dt * maxR * CFG.FOG_SPREAD_RATE);
+    const c = face.mouth || { x: W / 2, y: H / 2 }, s = CFG.MASK_SCALE;
+    state.fogCenter = { x: c.x * s, y: c.y * s };
+    const cx = c.x * s, cy = c.y * s, r = Math.max(MW * 0.15, state.fogRadius);
+    const g = mctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.85)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    mctx.globalCompositeOperation = 'source-over';
+    mctx.globalAlpha = Math.min(1, dt * 4);
+    mctx.fillStyle = g; mctx.fillRect(0, 0, MW, MH);
+    mctx.globalAlpha = 1;
+    state.lastBlow = t;
+    state.fadeFrozen = false; // fresh fog fades again until you draw or wipe
+  } else if (!state.fadeFrozen && state.fogAmount > 0 && t - state.lastBlow > CFG.FADE_DELAY) {
+    // Untouched fog slowly evaporates
+    state.fogAmount = Math.max(0, state.fogAmount - dt / CFG.FADE_DURATION);
+    if (state.fogAmount === 0) { mctx.clearRect(0, 0, MW, MH); state.fogRadius = 0; }
+  }
+}
+
+function drawFog(amount) {
+  // 1. Blurry, whitened copy of the scene at low resolution (blur hides the low res)
+  gctx.globalCompositeOperation = 'source-over';
+  gctx.clearRect(0, 0, FW, FH);
+  gctx.imageSmoothingEnabled = true; gctx.imageSmoothingQuality = 'high';
+  if (supportsFilter) {
+    gctx.filter = 'blur(6px)';
+    gctx.drawImage(frame, -12, -12, FW + 24, FH + 24);
+    gctx.filter = 'none';
+  } else {
+    tctx.imageSmoothingEnabled = true;
+    tctx.drawImage(frame, 0, 0, tiny.width, tiny.height);
+    gctx.drawImage(tiny, 0, 0, FW, FH);
+  }
+  gctx.fillStyle = 'rgba(240,243,245,0.55)'; gctx.fillRect(0, 0, FW, FH);
+
+  // 2. Scale it up, then cut it with the full-resolution mask so lines have smooth edges
+  sctx.globalCompositeOperation = 'source-over';
+  sctx.clearRect(0, 0, W, H);
+  sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
+  sctx.drawImage(fog, 0, 0, W, H);
+  sctx.globalCompositeOperation = 'destination-in';
+  sctx.drawImage(mask, 0, 0, W, H);
+  // The stroke you're drawing right now shows live, before it's cleaned up
+  if (hand.stroke && hand.stroke.length) {
+    pvctx.clearRect(0, 0, W, H);
+    // Live correction: smooth the stroke so far every frame. The smoothing window shrinks
+    // near your fingertip, so the newest bit stays responsive and older parts settle into place
+    drawStroke(pvctx, CFG.LIVE_CORRECTION ? cleanStroke(hand.stroke) : hand.stroke, false);
+    sctx.globalCompositeOperation = 'destination-out';
+    sctx.drawImage(preview, 0, 0);
+  }
+  sctx.globalCompositeOperation = 'source-over';
+
+  const eased = amount * amount * (3 - 2 * amount);
+  ctx.globalAlpha = eased;
+  ctx.drawImage(shade, 0, 0);
+  ctx.globalAlpha = 1;
+}
+
+let lastT = 0;
+function render(ts) {
+  const t = ts / 1000, dt = Math.min(0.05, lastT ? t - lastT : 0.016); lastT = t;
+  const mouthOpen = face.mouthOpen && t - face.lastSeen < 0.5;
+  face.openTime = mouthOpen ? face.openTime + dt : 0;
+  const blowing = keyBlow || face.openTime > CFG.MOUTH_HOLD;
+  updateFog(t, dt, blowing);
+
+  if (video.readyState >= 2) {
+    fctx.save(); fctx.translate(W, 0); fctx.scale(-1, 1);
+    fctx.drawImage(video, W - R.x - R.w, R.y, R.w, R.h);
+    fctx.restore();
+  }
+  ctx.drawImage(frame, 0, 0);
+  if (state.fogAmount > 0.001) drawFog(state.fogAmount);
+  if (hand.visible && hand.cursor && state.fogAmount > 0.05 && (hand.pose === 'point' || hand.pose === 'fist')) {
+    const c = hand.cursor, r = Math.max(4, (hand.penW || 10) * 0.5);
+    ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.lineWidth = 2 * dpr;
+    if (hand.inking) { ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill(); }
+    else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.stroke();
+      // While pointing and holding still, an arc fills in to show when the pen will go down
+      if (hand.pose === 'point' && hand.armProgress > 0) {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, r + 5 * dpr, -Math.PI / 2, -Math.PI / 2 + hand.armProgress * Math.PI * 2);
+        ctx.lineWidth = 3 * dpr; ctx.stroke();
+      }
+    }
+  }
+  setOn('hDraw', hand.pose === 'point' && state.fogAmount > 0.05);
+  setOn('hHover', hand.pose === 'fist' && state.fogAmount > 0.05);
+  setOn('hWipe', hand.wiping && state.fogAmount > 0.05);
+  if (debugOn) {
+    $('debug').textContent =
+      `mouth gap   ${face.open.toFixed(3)}  (open > ${CFG.MOUTH_OPEN})\n` +
+      `mouth open  ${mouthOpen ? 'yes' : 'no'}\n` +
+      `hand pose   ${hand.pose}\n` +
+      `camera fps  ${camFps}\n` +
+      `fog         ${state.fogAmount.toFixed(2)}\n` +
+      `hand size   ${(hand.sizeShare || 0).toFixed(3)}  (far ${CFG.PEN_FAR}, near ${CFG.PEN_NEAR})`;
+  }
+  requestAnimationFrame(render);
+}
+
+const onCache = {};
+function setOn(id, on) { const v = on ? '1' : '0'; if (onCache[id] !== v) { onCache[id] = v; $(id).dataset.on = v; } }
+
+// ---------- Tracking loop ----------
+let hands, faceMesh, busy = false, tick = 0, camFps = '?';
+async function trackLoop() {
+  if (video.readyState >= 2 && !busy) {
+    busy = true;
+    try {
+      await hands.send({ image: video });
+      if (tick++ % 4 === 0) await faceMesh.send({ image: video });
+    } catch (e) { console.error(e); }
+    busy = false;
+  }
+  requestAnimationFrame(trackLoop);
+}
+
+// ---------- Start ----------
+async function start() {
+  const btn = $('startBtn'), status = $('status');
+  btn.disabled = true; status.className = 'status';
+  status.textContent = 'Asking for camera access…';
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: 'user' },
+      audio: false,
+    });
+  } catch (e) {
+    status.className = 'status error';
+    status.textContent = 'Camera access was blocked. Allow it in your browser’s site settings, then try again.';
+    btn.disabled = false; return;
+  }
+  video.srcObject = stream; await video.play();
+  camFps = Math.round(stream.getVideoTracks()[0].getSettings().frameRate || 0) || '?';
+  computeRect();
+
+  status.textContent = 'Loading hand and face tracking…';
+  try {
+    hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.onResults(onHands);
+    faceMesh = new FaceMesh({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}` });
+    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    faceMesh.onResults(onFace);
+    await hands.initialize();
+    await faceMesh.initialize();
+  } catch (e) {
+    console.error(e);
+    status.className = 'status error';
+    status.textContent = 'Tracking failed to load. Check your internet connection and reload the page.';
+    btn.disabled = false; return;
+  }
+
+  $('start').hidden = true; $('hints').hidden = false; $('keys').hidden = false;
+  trackLoop();
+}
+
+$('startBtn').addEventListener('click', start);
+addEventListener('resize', resize);
+addEventListener('keydown', (e) => {
+  if (e.key === 'd' || e.key === 'D') { debugOn = !debugOn; $('debug').classList.toggle('show', debugOn); }
+  if (e.key === 'b' || e.key === 'B') keyBlow = true;
+});
+addEventListener('keyup', (e) => { if (e.key === 'b' || e.key === 'B') keyBlow = false; });
+
+resize();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
